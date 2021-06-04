@@ -23,7 +23,6 @@ int main(int argc, char** argv) {
 		&date.month, &date.day, &date.year,
 		&timepoint.hour, &timepoint.minute, &timepoint.second
 	);
-	printf("%li\n", clock() - start);
 	
 	int totaldays = date.year * 365 + date.month * 30 + date.day;
 	int totalseconds = timepoint.hour * 3600 + timepoint.minute * 60 + timepoint.second;
