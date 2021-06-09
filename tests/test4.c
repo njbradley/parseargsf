@@ -1,4 +1,4 @@
-#include "../parseargsf.h"
+#include "parseargsf.h"
 #include <time.h>
 
 typedef struct date_t {

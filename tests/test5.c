@@ -1,4 +1,4 @@
-#include "../parseargsf.h"
+#include "parseargsf.h"
 
 int main(int argc, char** argv) {
 	int x, y;

@@ -16,6 +16,7 @@
 
 typedef struct arginfo {
 	char name[100];
+	char prettyname[100];
 	char format[100];
 	int position;
 	bool required;
@@ -26,19 +27,26 @@ typedef struct arginfo {
 	char description[100];
 } arginfo;
 
+typedef struct commandarg {
+	char* full;
+	int index;
+	char flag[50];
+	char param[50];
+	bool is_short;
+	bool used;
+	int position;
+} commandarg;
+
 typedef struct commandargs {
 	int num;
 	char** argv;
-	bool* positional;
-	bool* used;
+	commandarg args[20];
 	int nextpos;
+	bool required;
 } commandargs;
 
 static int get_specifier(const char* lastletter, arginfo* info) {
-	if (*lastletter == '!') {
-		info->required = 1;
-		return 1;
-	} else if (*lastletter == ')' && *(lastletter-1) == '(') {
+	if (*lastletter == ')' && *(lastletter-1) == '(') {
 		info->function = 1;
 		return 2;
 	} else if (*(lastletter-1) == '|') {
@@ -51,22 +59,27 @@ static int get_specifier(const char* lastletter, arginfo* info) {
 static void init_arginfo(commandargs* cargs, arginfo* info, const char* format) {
 	dprintf("Initializing arg info with format:'%s'\n", format);
 	info->position = cargs->nextpos;
-	info->required = false;
+	info->required = cargs->required;
 	info->needs_arg = true;
 	info->function = false;
 	info->num_params = 0;
 	info->shorthand = 0;
 	info->description[0] = 0;
 	
+	if (format[0] == '[') {
+		info->required = false;
+		cargs->required = false;
+	}
+	
 	while (format[0] == '-') {
 		format ++;
 		info->position = 0;
+		info->required = false;
 	}
 	
-	if (info->position) {
+	if (info->position != 0) {
 		cargs->nextpos ++;
 	}
-	
 	int index = 0;
 	while (format[index] != ':' && format[index] != ' ' && format[index] != 0) {
 		info->name[index] = format[index];
@@ -74,28 +87,37 @@ static void init_arginfo(commandargs* cargs, arginfo* info, const char* format) 
 	}
 	info->name[index] = 0;
 	format += index;
-	if (format[0] == ':') format ++;
+	if (format[0] == ':') {
+		format ++;
+		index = 0;
+		while (format[index] != ' ' && format[index] != 0) {
+			info->format[index] = format[index];
+			index ++;
+		}
+		info->format[index] = 0;
+	} else if (info->position != 0) {
+		printf("Copying from name %s \n", info->prettyname);
+		strcpy(info->format, info->name);
+		info->name[0] = 0;
+	}
 	
 	index = 0;
 	bool last_was_percent = false;
-	while (format[index] != ' ' && format[index] != 0) {
-		// contar los parametros que se necesita
-		if (format[index] == '%' && !last_was_percent) {
-			if (format[index+1] != '%') {
+	while (info->format[index] != 0) {
+		if (info->format[index] == '%' && !last_was_percent) {
+			if (info->format[index+1] != '%') {
 				info->num_params ++;
 			}
 			last_was_percent = true;
 		} else {
 			last_was_percent = false;
 		}
-		
-		info->format[index] = format[index];
 		index ++;
 	}
-	info->format[index] = 0;
-	
+	printf(" %i\n", info->num_params);
 	if (info->num_params == 0) {
 		info->num_params = 1;
+		info->needs_arg = false;
 	}
 	
 	while (format[index] == ' ') index ++;
@@ -109,48 +131,144 @@ static void init_arginfo(commandargs* cargs, arginfo* info, const char* format) 
 		info->description[index] = 0;
 	}
 	
-	info->needs_arg = index != 0;
-	
-	int chars_removed;
-	int lastindex = strlen(info->name) - 1;
-	while ((chars_removed = get_specifier(info->name + lastindex, info))) {
-		lastindex -= chars_removed;
+	if (info->name[0] != 0) {
+		int chars_removed;
+		int lastindex = strlen(info->name) - 1;
+		while ((chars_removed = get_specifier(info->name + lastindex, info))) {
+			lastindex -= chars_removed;
+		}
+		info->name[lastindex + 1] = 0;
+	} else if (info->name[1] == 0) {
+		if (info->shorthand != 0) {
+			ARGF_SYNTAX_ERR("Parameter '%s' has multiple shorthands, only one can be specified.", info->prettyname);
+		}
+		info->shorthand = info->name[0];
+		info->name[0] = 0;
 	}
-	info->name[lastindex + 1] = 0;
+	
+	if (info->name[0] != 0) {
+		strcpy(info->prettyname, info->name);
+	} else {
+		if (info->position != 0) {
+			sprintf(info->prettyname, "PARAM %i", info->position);
+		} else if (info->shorthand != 0) {
+			info->prettyname[0] = info->shorthand;
+			info->prettyname[1] = 0;
+		}
+	}
 	
 	// error checking
 	if (!info->needs_arg && info->required) {
-		ARGF_SYNTAX_ERR("Parameter '%s' is both a flag and required\n", info->name);
+		ARGF_SYNTAX_ERR("Parameter '%s' is both a flag and required\n", info->prettyname);
 	} else if (!info->needs_arg && info->position) {
-		ARGF_SYNTAX_ERR("Parameter '%s' is both boolean and positional\n", info->name);
+		ARGF_SYNTAX_ERR("Parameter '%s' is both boolean and positional\n", info->prettyname);
 	}
 	
 	dprintf("Done, name:%s format:%s position:%i\n", info->name, info->format, info->position);
 }
 
-static void init_commandargs(commandargs* cargs, int argc, char** argv) {
-	cargs->num = argc;
-	cargs->argv = argv;
-	cargs->positional = malloc(argc);
-	cargs->used = malloc(argc);
-	cargs->nextpos = 1;
-	for (int i = 1; i < cargs->num; i ++) {
-		cargs->positional[i] = argv[i][0] != '-';
-		cargs->used[i] = false;
+static void init_commandarg(commandarg* carg, commandargs* cargs, int index, bool* flagoverride, int* curposition) {
+	carg->full = cargs->argv[index];
+	carg->param[0] = 0;
+	carg->flag[0] = 0;
+	carg->is_short = false;
+	carg->index = index;
+	carg->position = 0;
+	carg->used = false;
+	const char* param = carg->full;
+	
+	if (param[0] == '-' && !*flagoverride) {
+		// Some arguments can be -, ie for stdin
+		if (param[1] == 0) {
+			carg->param[0] = '-';
+			carg->param[1] = 0;
+			carg->position = (*curposition) ++;
+		} else if (param[1] == '-') {
+			// If it is --, then stop parsing flags
+			if (param[2] == 0) {
+				*flagoverride = true;
+				carg->used = true;
+			} else if (param[2] == '-') {
+				ARGF_INPUT_ERR("found '---' at the start of parameter '%s'. Did you mean '--'?\n"
+						"If you meant it, you should put '--' as a parameter somewhere before this argument\n", param);
+			} else {
+				char* loc = strchr(param+2, '=');
+				if (loc != NULL) {
+					strcpy(carg->param, loc+1);
+					strncpy(carg->flag, param + 2, loc - param - 2);
+				} else {
+					strcpy(carg->flag, param + 2);
+				}
+			}
+		} else {
+			carg->is_short = true;
+			strcpy(carg->flag, param + 1);
+		}
+	} else {
+		strcpy(carg->param, param);
+		carg->position = (*curposition) ++;
 	}
 }
 
-// returns the index into argv given an info pointer
-static int findarg(commandargs* cargs, arginfo* info) {
-	int index = 0;
+static void init_commandargs(commandargs* cargs, int argc, char** argv) {
+	cargs->num = argc;
+	cargs->argv = argv;
+	cargs->nextpos = 1;
+	cargs->required = true;
+	bool flagoverride = false;
+	int position = 1;
 	for (int i = 1; i < cargs->num; i ++) {
-		if (cargs->positional[i]) index ++;
-		if (index != 0 && info->position == index) {
-			dprintf("Found positional %s %i %s\n", info->name, info->position, cargs->argv[i]);
-			return i;
-		} else if (cargs->argv[i][0] == '-') {
-			if (strcmp(cargs->argv[i]+1, info->name) == 0 || strcmp(cargs->argv[i]+2, info->name) == 0) {
-				dprintf("Found %s %s %s\n", info->name, cargs->argv[i], cargs->argv[i+1]);
+		init_commandarg(cargs->args + i, cargs, i, &flagoverride, &position);
+	}
+}
+
+static int findarg(commandargs* cargs, arginfo* info) {
+	for (int i = 1; i <= cargs->num; i ++) {
+		if (info->position != 0) {
+			if (cargs->args[i].position == info->position) {
+				return i;
+			}
+		} else {
+			bool needs_next = false;
+			if (cargs->args[i].is_short) {
+				if (info->shorthand != 0) {
+					char* match = strchr(cargs->args[i].flag, info->shorthand);
+					if (match != NULL) {
+						if (info->needs_arg) {
+							if (match[1] == 0) {
+								needs_next = true;
+							} else {
+								strcpy(cargs->args[i].param, match+1);
+								*match = 0;
+								return i;
+							}
+						} else {
+							return i;
+						}
+					}
+				}
+			} else if (info->name[0] != 0 && strcmp(cargs->args[i].flag, info->name) == 0) {
+				if (info->needs_arg && cargs->args[i].param[0] == 0) {
+					printf("setting needs_next\n");
+					needs_next = true;
+				} else {
+					return i;
+				}
+			}
+			
+			if (needs_next) {
+				// No parameter provided (if the next one doesn't have a position, it is a flag)
+				if (i == cargs->num || cargs->args[i+1].position == 0) {
+					ARGF_INPUT_ERR("Expected parameter for flag '%s'\n", info->prettyname);
+				}
+				// Copying param from next one
+				strcpy(cargs->args[i].param, cargs->args[i+1].param);
+				cargs->args[i+1].used = true;
+				cargs->args[i+1].position = 0;
+				for (int j = i+2; j < cargs->num; j ++) {
+					cargs->args[j].position --;
+				}
+				
 				return i;
 			}
 		}
@@ -158,37 +276,21 @@ static int findarg(commandargs* cargs, arginfo* info) {
 	return 0;
 }
 
-// marks the params that info uses, if they are nonpositional
-static void mark_nonpositional(commandargs* cargs, arginfo* info) {
-	if (info->position == 0) {
-		int pos = findarg(cargs, info);
-		if (pos != 0) {
-			cargs->positional[pos] = false;
-			if (info->needs_arg) {
-				cargs->positional[pos+1] = false;
-			}
-		}
-	}
-}
-
 static int getarg(commandargs* cargs, arginfo* info, va_list vargs) {
 	dprintf("Getting args name:%s format:%s \n", info->name, info->format);
 	int numparams = info->num_params;
 	
 	int pos = findarg(cargs, info);
-	dprintf("Pos: %i\n", pos);
+	
 	if (pos != 0) {
-		cargs->used[pos] = true;
-		if (info->needs_arg && info->position == 0) {
-			pos ++;
-			cargs->used[pos] = true;
-		}
-		int gotargs = vsscanf(cargs->argv[pos], info->format, vargs);
+		cargs->args[pos].used = true;
+		int gotargs = vsscanf(cargs->args[pos].param, info->format, vargs);
 		if (gotargs != numparams) {
-			ARGF_INPUT_ERR("Expected input for param '%s' to be like:\n '%s' but got: '%s'\n", info->name, info->format, cargs->argv[pos]);
+			ARGF_INPUT_ERR("Expected input for param '%s' to be like:\n '%s' but got: '%s'\n",
+					info->prettyname, info->format, cargs->args[pos].param);
 		}
 	} else if (info->required) {
-		ARGF_INPUT_ERR("Missing required argument '%s'\n", info->name);
+		ARGF_INPUT_ERR("Missing required argument '%s'\n", info->prettyname);
 	}
 	return numparams;
 }
@@ -197,7 +299,7 @@ static int getarg_bool(commandargs* cargs, arginfo* info, va_list vargs) {
 	int pos = findarg(cargs, info);
 	if (pos != 0) {
 		*va_arg(vargs, bool*) = true;
-		cargs->used[pos] = true;
+		cargs->args[pos].used = true;
 	}
 	return 1;
 }
@@ -207,7 +309,7 @@ static int getarg_func(commandargs* cargs, arginfo* info, va_list vargs) {
 	if (pos != 0) {
 		void (*func)() = va_arg(vargs, void (*)());
 		func();
-		cargs->used[pos] = true;
+		cargs->args[pos].used = true;
 	}
 	return 1;
 }
@@ -236,11 +338,16 @@ static void print_usage(FILE* file, commandargs* cargs, arginfo* infos, int numi
 		}
 	}
 	
+	bool last_required = true;
 	for (int i = 0; i < num_positional; i ++) {
-		if (sortedargs[i]->required) {
-			fprintf(file, " %s <%s> ", sortedargs[i]->name, sortedargs[i]->format);
+		if (last_required && !sortedargs[i]->required) {
+			fprintf(file, "[");
+			last_required = false;
+		}
+		if (sortedargs[i]->name[0] == 0) {
+			fprintf(file, " <%s> ", sortedargs[i]->format);
 		} else {
-			fprintf(file, " [%s <%s>] ", sortedargs[i]->name, sortedargs[i]->format);
+			fprintf(file, " %s <%s> ", sortedargs[i]->prettyname, sortedargs[i]->format);
 		}
 	}
 	
@@ -248,7 +355,7 @@ static void print_usage(FILE* file, commandargs* cargs, arginfo* infos, int numi
 	
 	for (int i = 0; i < num_positional; i ++) {
 		if (sortedargs[i]->description[0] != 0) {
-			fprintf(file, " %s  - %s\n", sortedargs[i]->name, sortedargs[i]->description);
+			fprintf(file, " %s  - %s\n", sortedargs[i]->prettyname, sortedargs[i]->description);
 		}
 	}
 	
@@ -262,7 +369,7 @@ static void print_usage(FILE* file, commandargs* cargs, arginfo* infos, int numi
 			} else {
 				fprintf(file, "     ");
 			}
-			fprintf(file, " --%s ", infos[i].name);
+			fprintf(file, " --%s ", infos[i].prettyname);
 			if (infos[i].needs_arg) {
 				fprintf(file, " <%s>  - %s ", infos[i].format, infos[i].description);
 				num_printed += 4 + strlen(infos[i].format);
@@ -283,11 +390,11 @@ int count_words(const char* format) {
 			iter ++;
 		}
 		
-		while (*iter == ' ') iter ++;
+		while (*iter == ' ' || *iter == '[' || *iter == ']') iter ++;
 		if (*iter == '#') {
 			while (*(++iter) != '#' && *iter != 0);
 			if (*iter == '#') iter ++;
-			while (*iter == ' ') iter ++;
+			while (*iter == ' ' || *iter == '[' || *iter == ']') iter ++;
 		}
 	}
 	return num_arginfos;
@@ -312,7 +419,6 @@ int parseargsf(int argc, char** argv, const char* orig_format, ...) {
 	int start = 0;
 	for (int i = 0; i < num_arginfos; i ++) {
 		init_arginfo(&cargs, &infos[i], format + start);
-		mark_nonpositional(&cargs, &infos[i]);
 		numparams += infos[i].num_params;
 		
 		defined_help = defined_help || strcmp(infos[i].name, "help") == 0;
@@ -375,7 +481,7 @@ int parseargsf(int argc, char** argv, const char* orig_format, ...) {
 	}
 	
 	for (int i = 1; i < cargs.num; i ++) {
-		if (!cargs.used[i]) {
+		if (!cargs.args[i].used) {
 			ARGF_INPUT_ERR("Unexpected argument '%s'\n", cargs.argv[i]);
 		}
 	}
