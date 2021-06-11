@@ -10,9 +10,21 @@
 //#define dprintf(...) printf(__VA_ARGS__)
 #define dprintf(...)
 
-#define ARGF_ERR(...) fprintf(stderr, __VA_ARGS__); fputs("Use --help to get more info\n", stderr); exit(1);
+#define ARGF_ERR(...) fprintf(stderr, __VA_ARGS__); fputs("Use --help to get more info\n", stderr);// exit(1);
 #define ARGF_SYNTAX_ERR(...) ARGF_ERR("ARGF syntax error: " __VA_ARGS__)
-#define ARGF_INPUT_ERR(...) ARGF_ERR("input error: " __VA_ARGS__)
+#define ARGF_INPUT_ERR(code, ...) if (code > errcode) { errcode = code; sprintf(errmsg, "input error: " __VA_ARGS__);}
+
+enum argf_errorcode {
+	ARGF_SUCCESS,
+	ARGF_FORMAT_ERROR,
+	ARGF_MISSING_REQUIRED,
+	ARGF_UNEXPECTED_ARGUMENT,
+	ARGF_PARSE_ERROR,
+};
+
+static enum argf_errorcode errcode = ARGF_SUCCESS;
+static char errmsg[500] = "";
+
 
 typedef struct arginfo {
 	char name[100];
@@ -87,16 +99,16 @@ static void init_arginfo(commandargs* cargs, arginfo* info, const char* format) 
 	}
 	info->name[index] = 0;
 	format += index;
+	index = 0;
 	if (format[0] == ':') {
 		format ++;
-		index = 0;
 		while (format[index] != ' ' && format[index] != 0) {
 			info->format[index] = format[index];
 			index ++;
 		}
 		info->format[index] = 0;
+		format += index;
 	} else if (info->position != 0) {
-		printf("Copying from name %s \n", info->prettyname);
 		strcpy(info->format, info->name);
 		info->name[0] = 0;
 	}
@@ -114,12 +126,12 @@ static void init_arginfo(commandargs* cargs, arginfo* info, const char* format) 
 		}
 		index ++;
 	}
-	printf(" %i\n", info->num_params);
 	if (info->num_params == 0) {
 		info->num_params = 1;
 		info->needs_arg = false;
 	}
 	
+	index = 0;
 	while (format[index] == ' ') index ++;
 	if (format[index] == '#') {
 		format = format + index + 1;
@@ -189,8 +201,10 @@ static void init_commandarg(commandarg* carg, commandargs* cargs, int index, boo
 				*flagoverride = true;
 				carg->used = true;
 			} else if (param[2] == '-') {
-				ARGF_INPUT_ERR("found '---' at the start of parameter '%s'. Did you mean '--'?\n"
+				ARGF_INPUT_ERR(ARGF_PARSE_ERROR, "found '---' at the start of parameter '%s'. Did you mean '--'?\n"
 						"If you meant it, you should put '--' as a parameter somewhere before this argument\n", param);
+				carg->used = true;
+				carg->position = 0;
 			} else {
 				char* loc = strchr(param+2, '=');
 				if (loc != NULL) {
@@ -249,7 +263,6 @@ static int findarg(commandargs* cargs, arginfo* info) {
 				}
 			} else if (info->name[0] != 0 && strcmp(cargs->args[i].flag, info->name) == 0) {
 				if (info->needs_arg && cargs->args[i].param[0] == 0) {
-					printf("setting needs_next\n");
 					needs_next = true;
 				} else {
 					return i;
@@ -259,14 +272,15 @@ static int findarg(commandargs* cargs, arginfo* info) {
 			if (needs_next) {
 				// No parameter provided (if the next one doesn't have a position, it is a flag)
 				if (i == cargs->num || cargs->args[i+1].position == 0) {
-					ARGF_INPUT_ERR("Expected parameter for flag '%s'\n", info->prettyname);
-				}
-				// Copying param from next one
-				strcpy(cargs->args[i].param, cargs->args[i+1].param);
-				cargs->args[i+1].used = true;
-				cargs->args[i+1].position = 0;
-				for (int j = i+2; j < cargs->num; j ++) {
-					cargs->args[j].position --;
+					ARGF_INPUT_ERR(ARGF_MISSING_REQUIRED, "Expected parameter for flag '%s'\n", info->prettyname);
+				} else {
+					// Copying param from next one
+					strcpy(cargs->args[i].param, cargs->args[i+1].param);
+					cargs->args[i+1].used = true;
+					cargs->args[i+1].position = 0;
+					for (int j = i+2; j < cargs->num; j ++) {
+						cargs->args[j].position --;
+					}
 				}
 				
 				return i;
@@ -286,11 +300,11 @@ static int getarg(commandargs* cargs, arginfo* info, va_list vargs) {
 		cargs->args[pos].used = true;
 		int gotargs = vsscanf(cargs->args[pos].param, info->format, vargs);
 		if (gotargs != numparams) {
-			ARGF_INPUT_ERR("Expected input for param '%s' to be like:\n '%s' but got: '%s'\n",
+			ARGF_INPUT_ERR(ARGF_FORMAT_ERROR, "Expected input for param '%s' to be like:\n '%s' but got: '%s'\n",
 					info->prettyname, info->format, cargs->args[pos].param);
 		}
 	} else if (info->required) {
-		ARGF_INPUT_ERR("Missing required argument '%s'\n", info->prettyname);
+		ARGF_INPUT_ERR(ARGF_MISSING_REQUIRED, "Missing required argument '%s'\n", info->prettyname);
 	}
 	return numparams;
 }
@@ -347,7 +361,7 @@ static void print_usage(FILE* file, commandargs* cargs, arginfo* infos, int numi
 		if (sortedargs[i]->name[0] == 0) {
 			fprintf(file, " <%s> ", sortedargs[i]->format);
 		} else {
-			fprintf(file, " %s <%s> ", sortedargs[i]->prettyname, sortedargs[i]->format);
+			fprintf(file, " %s:<%s> ", sortedargs[i]->prettyname, sortedargs[i]->format);
 		}
 	}
 	
@@ -363,7 +377,6 @@ static void print_usage(FILE* file, commandargs* cargs, arginfo* infos, int numi
 	
 	for (int i = 0; i < numinfos; i ++) {
 		if (infos[i].position == 0) {
-			int num_printed = 0;
 			if (infos[i].shorthand != 0) {
 				fprintf(file, "  -%c,", infos[i].shorthand);
 			} else {
@@ -371,8 +384,10 @@ static void print_usage(FILE* file, commandargs* cargs, arginfo* infos, int numi
 			}
 			fprintf(file, " --%s ", infos[i].prettyname);
 			if (infos[i].needs_arg) {
-				fprintf(file, " <%s>  - %s ", infos[i].format, infos[i].description);
-				num_printed += 4 + strlen(infos[i].format);
+				fprintf(file, " <%s> ", infos[i].format);
+			}
+			if (infos[i].description[0] != 0) {
+				fprintf(file, "- %s ", infos[i].description);
 			}
 			fprintf(file, "\n");
 		}
@@ -450,7 +465,7 @@ int parseargsf(int argc, char** argv, const char* orig_format, ...) {
 	
 	if (!defined_help) {
 		for (int i = 0; i < cargs.num; i ++) {
-			if (strcmp(cargs.argv[i], "--help") == 0 || strcmp(cargs.argv[i], "-help") == 0) {
+			if (strcmp(cargs.argv[i], "--help") == 0) {
 				print_usage(stdout, &cargs, infos, num_arginfos);
 				exit(0);
 			}
@@ -482,8 +497,14 @@ int parseargsf(int argc, char** argv, const char* orig_format, ...) {
 	
 	for (int i = 1; i < cargs.num; i ++) {
 		if (!cargs.args[i].used) {
-			ARGF_INPUT_ERR("Unexpected argument '%s'\n", cargs.argv[i]);
+			ARGF_INPUT_ERR(ARGF_UNEXPECTED_ARGUMENT, "Unexpected argument '%s'\n", cargs.argv[i]);
 		}
+	}
+	
+	if (errcode != ARGF_SUCCESS) {
+		fprintf(stderr, "%s", errmsg);
+		fprintf(stderr, "Use --help for more information\n");
+		exit(errcode);
 	}
 	
 	return numparams;
